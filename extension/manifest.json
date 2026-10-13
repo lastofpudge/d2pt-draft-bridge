@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "D2PT Draft Bridge",
+  "version": "0.1.0",
+  "description": "Transfers a local draft feed into Dota2ProTracker Drafter.",
+  "permissions": ["storage"],
+  "host_permissions": ["https://dota2protracker.com/*", "http://127.0.0.1:8765/*"],
+  "content_scripts": [
+    {
+      "matches": ["https://dota2protracker.com/drafter*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
