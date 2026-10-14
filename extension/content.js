@@ -10,52 +10,29 @@
 	let resetGeneration = null
 	let panel
 	const DEBUG = false
-	const logs = []
 
 	const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
+	async function waitFor(predicate, timeout = 2500, interval = 50) {
+		const deadline = Date.now() + timeout
+		while (Date.now() < deadline) {
+			const value = predicate()
+			if (value) return value
+			await sleep(interval)
+		}
+		return null
+	}
+
 	const normalize = value =>
 		String(value || '')
 			.trim()
 			.toLowerCase()
 			.replace(/[^a-z0-9]/g, '')
 	function debug(level, message, details = {}) {
-		if (!DEBUG) return
-
-		const entry = { time: new Date().toLocaleTimeString(), level, message, details }
-		logs.push(entry)
-		if (logs.length > 100) logs.shift()
-
-		if (DEBUG) {
-			const output = JSON.stringify(details ?? {})
-			console[level === 'ERROR' ? 'error' : level === 'WARN' ? 'warn' : 'log'](`[D2PT Bridge ${level}] ${message} ${output}`)
-		}
-
-		renderLog()
-	}
-
-	function renderLog() {
-		if (!panel || !logs.length) return
-
-		let box = panel.querySelector('#d2pt-bridge-log')
-		if (!box) {
-			box = document.createElement('pre')
-			box.id = 'd2pt-bridge-log'
-			Object.assign(box.style, {
-				margin: '8px 0 0',
-				maxHeight: '180px',
-				overflowY: 'auto',
-				font: '11px/1.4 monospace',
-				color: '#ddd',
-				whiteSpace: 'pre-wrap',
-				overflowWrap: 'anywhere',
-			})
-			panel.appendChild(box)
-		}
-
-		box.textContent = logs
-			.slice(-12)
-			.map(entry => `${entry.time} [${entry.level}] ${entry.message} ${JSON.stringify(entry.details)}`)
-			.join('\n')
+		if (!DEBUG && level !== 'ERROR') return
+		console[level === 'ERROR' ? 'error' : level === 'WARN' ? 'warn' : 'log'](
+			`[D2PT Bridge ${level}] ${message}`,
+			details,
+		)
 	}
 
 	function showStatus(message) {
@@ -88,7 +65,6 @@
 		}
 
 		label.textContent = `D2PT Bridge: ${message}`
-		renderLog()
 	}
 
 	function visible(element) {
@@ -98,26 +74,38 @@
 	}
 
 	function getSlots(side) {
+		const lowerSide = side.toLowerCase()
 		return [...document.querySelectorAll('button[aria-label]')]
 			.filter(button => {
-				const label = button.getAttribute('aria-label') || ''
-				return label.startsWith(`Pick hero for ${side} slot `) && visible(button)
+				const label = (button.getAttribute('aria-label') || '').toLowerCase()
+				return label.startsWith(`pick hero for ${lowerSide} slot `) && visible(button)
 			})
 			.sort((a, b) => {
-				const getIndex = button => Number(button.getAttribute('aria-label').match(/slot (\d+)/)?.[1] || 99)
-				return getIndex(a) - getIndex(b)
+				const getSlotIndex = button =>
+					Number((button.getAttribute('aria-label') || '').match(/slot (\d+)/i)?.[1] || 99)
+				return getSlotIndex(a) - getSlotIndex(b)
 			})
 	}
 
 	function findEmptySlot(side) {
-		return getSlots(side).find(button => button.innerText.trim() === 'Pick') || null
+		return getSlots(side).find(button => /^pick$/i.test(button.innerText.trim())) || null
 	}
 
 	function hasHeroOnSide(side, heroName) {
 		const target = normalize(heroName)
-		return [...document.querySelectorAll(`button[aria-label^="Change ${side} slot "]`)].some(button =>
-			[...button.querySelectorAll('img[alt]')].some(image => normalize(image.alt) === target),
-		)
+		const lowerSide = side.toLowerCase()
+		return [...document.querySelectorAll('button[aria-label]')].some(button => {
+			const label = (button.getAttribute('aria-label') || '').toLowerCase()
+			if (!label.startsWith(`change ${lowerSide} slot `)) return false
+			return [...button.querySelectorAll('img[alt]')].some(image => normalize(image.alt) === target)
+		})
+	}
+
+	function selectedHeroCount(side) {
+		const lowerSide = side.toLowerCase()
+		return [...document.querySelectorAll('button[aria-label]')].filter(button =>
+			(button.getAttribute('aria-label') || '').toLowerCase().startsWith(`change ${lowerSide} slot `),
+		).length
 	}
 
 	function setInputValue(input, value) {
@@ -129,46 +117,55 @@
 		input.dispatchEvent(new Event('change', { bubbles: true }))
 	}
 
+	function closeHeroPicker() {
+		const pickerSearch = [...document.querySelectorAll('input')].find(input => {
+			if (!visible(input)) return false
+			const label = `${input.placeholder} ${input.getAttribute('aria-label') || ''}`.toLowerCase()
+			return /search\s+heroes/.test(label) && !/players|account|teams|tournaments/.test(label)
+		})
+		if (!pickerSearch) return
+
+		document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }))
+	}
+
 	async function findHeroButton(heroName) {
 		const target = normalize(heroName)
-		const search = [...document.querySelectorAll('input[placeholder="Search heroes..."]')].find(visible)
+		const findSearch = () =>
+			[...document.querySelectorAll('input')].find(input => {
+				if (!visible(input)) return false
+				const label = `${input.placeholder} ${input.getAttribute('aria-label') || ''}`.toLowerCase()
+				return /search\s+heroes/.test(label) && !/players|account|teams|tournaments/.test(label)
+			})
+		const search = await waitFor(findSearch)
 
 		if (!search) {
 			debug('ERROR', 'Slot hero search not found', { heroName })
 			return null
 		}
 
-		const picker = search.closest('div.fixed')
-		if (!picker) {
-			debug('ERROR', 'Slot hero picker not found', { heroName })
-			return null
-		}
-
 		setInputValue(search, heroName)
-		await sleep(300)
+		const findMatch = () => {
+			const picker = findSearch()?.closest(
+				'[role="dialog"], [class*="picker" i], [class*="overlay" i], [class*="modal" i], [class*="fixed" i], .fixed, [style*="fixed"]',
+			)
+			if (!picker) return null
 
-		const candidates = [...picker.querySelectorAll('button')].filter(button => {
-			if (!visible(button)) return false
+			return [...picker.querySelectorAll('button')].find(button => {
+				if (!visible(button)) return false
+				const image = button.querySelector('img[alt]')
+				const lines = button.innerText
+					.split(/\r?\n/)
+					.map(line => normalize(line))
+					.filter(Boolean)
+				return normalize(image?.alt) === target && lines.includes(target)
+			})
+		}
+		const heroButton = await waitFor(findMatch)
 
-			const image = button.querySelector('img[alt]')
-			if (!image || normalize(image.alt) !== target) return false
-
-			const text = button.innerText || ''
-			const lines = text
-				.split(/\n|\r/)
-				.map(line => line.trim())
-				.filter(Boolean)
-
-			return lines.some(line => normalize(line) === target)
-		})
-
-		debug(candidates.length ? 'INFO' : 'ERROR', 'Hero card search result', {
+		debug(heroButton ? 'INFO' : 'ERROR', 'Hero card search result', {
 			heroName,
-			count: candidates.length,
-			matches: candidates.slice(0, 3).map(button => (button.innerText || '').trim().slice(0, 100)),
 		})
-
-		return candidates[0] || null
+		return heroButton
 	}
 
 	async function pickHero(side, heroName) {
@@ -186,84 +183,36 @@
 		const slotLabel = slot.getAttribute('aria-label')
 		debug('INFO', 'Opening target slot', { side, heroName, slotLabel })
 		slot.click()
-		await sleep(150)
+		const activeSlot = await waitFor(
+			() => document.querySelector('button[aria-current="true"][aria-label^="Pick hero for" i]')?.getAttribute('aria-label') === slotLabel,
+		)
+		if (!activeSlot) return 'slot-not-opened'
 
 		const heroButton = await findHeroButton(heroName)
 		if (!heroButton) return 'not-found'
 
-		const currentSlot = [...document.querySelectorAll('button[aria-label^="Pick hero for"]')].find(
-			button => button.getAttribute('aria-label') === slotLabel && visible(button),
-		)
-
-		const activeLabel = document.querySelector('button[aria-current="true"][aria-label^="Pick hero for"]')?.getAttribute('aria-label') || null
-
-		debug('INFO', 'Before hero click', {
-			side,
-			heroName,
-			expectedSlot: slotLabel,
-			slotStillExists: Boolean(currentSlot),
-			activeLabel,
-		})
-
-		if (!currentSlot || activeLabel !== slotLabel) {
-			debug('ERROR', 'Target slot is no longer active; stopping to avoid wrong-side pick', {
-				side,
-				heroName,
-				expectedSlot: slotLabel,
-				activeLabel,
-			})
+		if (document.querySelector('button[aria-current="true"][aria-label^="Pick hero for" i]')?.getAttribute('aria-label') !== slotLabel) {
 			return 'slot-changed'
 		}
 
-		debug('INFO', 'Clicked hero button details', {
-			side,
-			heroName,
-			buttonText: heroButton.innerText,
-			buttonHTML: heroButton.outerHTML.slice(0, 500),
-			slotBeforeClick: document.querySelector('button[aria-current="true"][aria-label^="Pick hero for"]')?.getAttribute('aria-label') ?? null,
-		})
-
+		const selectedBefore = selectedHeroCount(side)
 		heroButton.click()
-		await sleep(350)
+		return await waitFor(() => {
+			if (hasHeroOnSide(side, heroName)) return 'picked'
+			return selectedHeroCount(side) > selectedBefore ? 'wrong-hero' : null
+		}) || 'not-confirmed'
+	}
 
-		debug('INFO', 'DOM after hero click', {
-			activeSlot: document.querySelector('button[aria-current="true"][aria-label^="Pick hero for"]')?.getAttribute('aria-label') ?? null,
-			radiantSlots: getSlots('radiant').map(button => ({
-				label: button.getAttribute('aria-label'),
-				text: button.innerText.trim().slice(0, 60),
-			})),
-			direSlots: getSlots('dire').map(button => ({
-				label: button.getAttribute('aria-label'),
-				text: button.innerText.trim().slice(0, 60),
-			})),
-		})
-		await sleep(150)
-
-		const sideSlots = getSlots(side)
-		const targetStillEmpty = sideSlots.some(button => button.getAttribute('aria-label') === slotLabel && button.innerText.trim() === 'Pick')
-		const otherSide = side === 'radiant' ? 'dire' : 'radiant'
-		const otherSlots = getSlots(otherSide)
-		const otherSideChanged = otherSlots.some(button => button.innerText.trim() !== 'Pick')
-
-		debug('INFO', 'After hero click', {
-			side,
-			heroName,
-			targetSlotStillEmpty: targetStillEmpty,
-			remainingEmptySlotsOnSide: sideSlots.filter(button => button.innerText.trim() === 'Pick').length,
-			occupiedSlotsOnOtherSide: otherSlots
-				.filter(button => button.innerText.trim() !== 'Pick')
-				.map(button => ({
-					label: button.getAttribute('aria-label'),
-					text: button.innerText.trim().slice(0, 80),
-				})),
-		})
-
-		if (targetStillEmpty) {
-			debug('ERROR', 'Hero was not placed in requested slot', { side, heroName, slotLabel, otherSideChanged })
-			return 'not-confirmed'
+	async function pickHeroWithRetries(side, heroName) {
+		let lastResult = 'not-confirmed'
+		for (let attempt = 1; attempt <= 3; attempt += 1) {
+			const result = await pickHero(side, heroName)
+			if (['picked', 'already-picked', 'no-empty-slot', 'wrong-hero'].includes(result)) return result
+			lastResult = result
+			debug('WARN', 'Pick attempt failed', { side, heroName, attempt, result })
+			await sleep(250)
 		}
-
-		return 'picked'
+		return lastResult
 	}
 
 	async function applySide(side, heroes) {
@@ -273,22 +222,24 @@
 			const heroName = String(rawName || '').trim()
 			if (!heroName) continue
 
-			const result = await pickHero(side, heroName)
+			const result = await pickHeroWithRetries(side, heroName)
 			results.push(`${side} ${heroName} — ${result}`)
 
-			if (result !== 'picked' && result !== 'already-picked') break
+			if (!['picked', 'already-picked'].includes(result)) break
 		}
 
 		return results
 	}
 
 	function readRecommendations() {
-		const heading = [...document.querySelectorAll('span')].find(element => element.textContent.trim() === 'Recommended Picks')
-		const section = heading?.parentElement?.parentElement
+		const heading = [...document.querySelectorAll('span')].find(
+			element => normalize(element.textContent) === 'recommendedpicks',
+		)
+		const section = heading?.closest('div.rounded-2xl') || heading?.parentElement?.parentElement
 		if (!section) return null
 
 		const sideButton = [...section.querySelectorAll('button')].find(
-			button => ['Radiant', 'Dire'].includes(button.innerText.trim()) && button.getAttribute('aria-pressed') === 'true',
+			b => ['radiant', 'dire'].includes(normalize(b.innerText)) && b.getAttribute('aria-pressed') === 'true',
 		)
 		if (!sideButton) return null
 
@@ -320,7 +271,7 @@
 		if (!result) return
 		if (!result.items.length) {
 			if (Date.now() - lastNoRecommendationsNoticeAt > 8000) {
-				showStatus('D2PT is open, but no recommendation cards were found. Check the Recommended Picks section.')
+				debug('WARN', 'No recommendation cards found')
 				lastNoRecommendationsNoticeAt = Date.now()
 			}
 			return
@@ -407,7 +358,7 @@
 
 			if (signature === lastPayloadSignature) return
 
-			if (!document.querySelector('button[aria-label="Pick hero for radiant slot 1"]')) {
+			if (!document.querySelector('button[aria-label$="slot 1" i]')) {
 				showStatus('Draft slots not found. Open the Draft tab and refresh the page.')
 				return
 			}
@@ -429,6 +380,7 @@
 			}
 
 			lastPayloadSignature = signature
+			closeHeroPicker()
 			showStatus(`Applied ${picked} pick(s); skipped ${skipped} already placed.`)
 			debug('INFO', 'Draft application complete', { results })
 		} catch (error) {

@@ -2,13 +2,12 @@
 
 Windows bridge that reads Dota 2 draft picks and fills empty hero slots on the Dota2ProTracker Drafter page.
 
-The bridge receives game phase updates through Dota's Game State Integration (GSI), reads hero portraits from the visible Dota window, and serves the
-current draft to the Chrome extension on `127.0.0.1:8765`. It does not launch the Dota Draft Assist desktop app, read game memory, or send input to
-Dota.
+The bridge reads hero portraits from the Dota window and serves the current draft to the Chrome extension on `127.0.0.1:8765`. It does not use
+Game State Integration (GSI), launch the Dota Draft Assist desktop app, read game memory, or send input to Dota.
 
 ## What's In The Folder
 
-- `bridge.py` runs the local HTTP service, GSI receiver, and screen reader.
+- `bridge.py` runs the local HTTP service and screen reader.
 - `bridge_runtime/` contains the Python environment, capture/recognition modules, and portrait library required by the bridge. It is a reduced
   runtime, not the full Dota Draft Assist project.
 - `recommendation_panel.py` shows D2PT's active-side top picks in an always-on-top window. Clicking a row copies the hero name; it does not select a
@@ -22,12 +21,10 @@ Dota.
 
 1. Run `start-bridge-minimized.bat` and leave the bridge window open. This also opens the recommendations panel. To keep the console visible, run
    `start-bridge.bat` instead.
-2. In Steam, add `-gamestateintegration` to Dota 2's launch options and restart Dota 2. The bridge attempts to install its GSI config in common Steam
-   locations. If Dota is installed elsewhere, set `DOTA_DIR` to its installation directory before starting the bridge.
-3. In Chrome, open `chrome://extensions`, enable Developer mode, select **Load unpacked**, and choose the `extension` folder.
-4. Open https://dota2protracker.com/drafter and refresh the page.
-5. Keep Dota visible in borderless windowed mode. Confirm recognized picks on the page; the extension fills empty slots only.
-6. The panel shows the active Radiant/Dire side's five highest-ranked D2PT picks. Click a name to copy it, then select the hero manually in Dota.
+2. In Chrome, open `chrome://extensions`, enable Developer mode, select **Load unpacked**, and choose the `extension` folder.
+3. Open https://dota2protracker.com/drafter and refresh the page.
+4. Keep Dota visible during hero selection. Fullscreen is supported when the screen reader reports that it is capturing Dota.
+5. The panel shows the active Radiant/Dire side's five highest-ranked D2PT picks. Click a name to copy it, then select the hero manually in Dota.
 
 To send picks manually:
 
