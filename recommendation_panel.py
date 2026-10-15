@@ -154,9 +154,11 @@ class RecommendationPanel(QWidget):
         self.resume_button.setEnabled(not enabled)
 
     def _show_recommendations(self, payload):
-        side = payload.get('side', '')
-        items = payload.get('items', [])
-        if not payload.get('updated') or not items:
+        recommendations = {
+            'Radiant': payload.get('radiant', []),
+            'Dire': payload.get('dire', []),
+        }
+        if not payload.get('updated') or not any(recommendations.values()):
             self._show_empty(
                 'No live recommendations',
                 'Open D2PT Drafter and add your current picks.',
@@ -164,45 +166,54 @@ class RecommendationPanel(QWidget):
             )
             return
 
-        signature = json.dumps([side, items], sort_keys=True)
+        signature = json.dumps(recommendations, sort_keys=True)
         if signature == self._signature:
             return
         self._signature = signature
         self._clear_items()
-        self.side_label.setText(side.upper())
+        self.side_label.setText('LIVE')
         self.footer.setText('Click a name to copy it; pick manually in Dota.')
 
-        for index, item in enumerate(items[:5], 1):
-            name = str(item.get('name', '')).strip()
-            if not name:
+        for side, items in recommendations.items():
+            if not items:
                 continue
+            heading = QLabel(side.upper())
+            heading.setObjectName('eyebrow')
+            self.items_layout.addWidget(heading)
+            for index, item in enumerate(items[:5], 1):
+                self._add_recommendation_card(index, item)
 
-            card = QPushButton()
-            card.setObjectName('pickCard')
-            card.setCursor(Qt.CursorShape.PointingHandCursor)
-            card.setFixedHeight(62)
-            card.setToolTip(f'Copy {name}; you choose the hero in Dota')
-            card.clicked.connect(lambda checked=False, hero=name: self._copy_hero(hero))
+    def _add_recommendation_card(self, index, item):
+        name = str(item.get('name', '')).strip()
+        if not name:
+            return
 
-            row = QHBoxLayout(card)
-            row.setContentsMargins(2, 0, 2, 0)
-            rank = QLabel(f'{index:02d}')
-            rank.setObjectName('rank')
-            row.addWidget(rank)
+        card = QPushButton()
+        card.setObjectName('pickCard')
+        card.setCursor(Qt.CursorShape.PointingHandCursor)
+        card.setFixedHeight(62)
+        card.setToolTip(f'Copy {name}; you choose the hero in Dota')
+        card.clicked.connect(lambda checked=False, hero=name: self._copy_hero(hero))
 
-            labels = QVBoxLayout()
-            labels.setSpacing(2)
-            hero = QLabel(name)
-            hero.setObjectName('hero')
-            details = ' | '.join(
-                part for part in (item.get('role', ''), item.get('matches', '')) if part
-            )
-            detail = QLabel(details)
-            detail.setObjectName('detail')
-            labels.addWidget(hero)
-            labels.addWidget(detail)
-            row.addLayout(labels, 1)
-            self.items_layout.addWidget(card)
+        row = QHBoxLayout(card)
+        row.setContentsMargins(2, 0, 2, 0)
+        rank = QLabel(f'{index:02d}')
+        rank.setObjectName('rank')
+        row.addWidget(rank)
+
+        labels = QVBoxLayout()
+        labels.setSpacing(2)
+        hero = QLabel(name)
+        hero.setObjectName('hero')
+        details = ' | '.join(
+            part for part in (item.get('role', ''), item.get('matches', '')) if part
+        )
+        detail = QLabel(details)
+        detail.setObjectName('detail')
+        labels.addWidget(hero)
+        labels.addWidget(detail)
+        row.addLayout(labels, 1)
+        self.items_layout.addWidget(card)
 
     def refresh(self):
         try:

@@ -1,22 +1,40 @@
 import argparse
 import importlib
+import logging
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import sys
-import subprocess
 from pathlib import Path
 from threading import Event, Lock, Thread
 from time import time
+from logging.handlers import RotatingFileHandler
 
 HOST = '127.0.0.1'
 DEFAULT_PORT = 8765
+LOG_PATH = Path(__file__).resolve().with_name('bridge.log')
 lock = Lock()
 draft = {'radiant': [], 'dire': [], 'updated': 0}
-recommendations = {'side': '', 'items': [], 'updated': 0}
+recommendations = {'radiant': [], 'dire': [], 'updated': 0}
 reset_generation = 0
 watching_enabled = True
 watch_generation = 0
 screen_capture_status = 'starting'
+logger = logging.getLogger('d2pt_bridge')
+
+
+def _configure_logging():
+    logger.setLevel(logging.INFO)
+    logger.handlers.clear()
+    logger.addHandler(RotatingFileHandler(
+        LOG_PATH,
+        encoding='utf-8',
+        maxBytes=1_000_000,
+        backupCount=3,
+    ))
+
+
+def log_event(event, **details):
+    logger.info('%s %s', event, json.dumps(details, ensure_ascii=False, sort_keys=True))
 
 
 def _set_watching(enabled):
@@ -27,6 +45,7 @@ def _set_watching(enabled):
         watching_enabled = enabled
         watch_generation += 1
         draft = {'radiant': [], 'dire': [], 'updated': 0}
+        log_event('watching-changed', enabled=enabled, generation=watch_generation)
         return {'watching': watching_enabled, 'watch_generation': watch_generation}
 
 HERO_ID_MAP = {
@@ -88,6 +107,28 @@ def _screen_draft_is_reliable(screen_draft):
     return bool(screen_draft['radiant'] or screen_draft['dire'])
 
 
+def _screen_snapshot_has_duplicate_heroes(snapshot, hero_names):
+    """A Dota draft cannot contain the same hero twice on one side.
+
+    The portrait detector occasionally repeats the previous slot's ID while a
+    portrait is animating.  Treat that as an unreadable frame rather than
+    publishing a shortened, shifted draft to the browser.
+    """
+    for side in ('left', 'right'):
+        seen = set()
+        for hero_id in getattr(snapshot, side, []) or []:
+            try:
+                hero_id = int(hero_id)
+            except (TypeError, ValueError):
+                continue
+            if hero_id not in hero_names:
+                continue
+            if hero_id in seen:
+                return True
+            seen.add(hero_id)
+    return False
+
+
 def _load_screen_hero_names(runtime_root):
     source = runtime_root / 'data_cache' / 'raw' / 'opendota_constants_heroes.json'
     try:
@@ -116,6 +157,7 @@ def _run_screen_capture(stop_event):
     runtime_root = Path(__file__).resolve().parent / 'bridge_runtime'
     if not runtime_root.is_dir():
         screen_capture_status = 'unavailable: bridge runtime folder not found'
+        log_event('screen-capture-unavailable', reason=screen_capture_status)
         print(f'Screen capture {screen_capture_status}.')
         return
     if str(runtime_root) not in sys.path:
@@ -138,6 +180,7 @@ def _run_screen_capture(stop_event):
         hero_names = _load_screen_hero_names(runtime_root)
     except Exception as exc:
         screen_capture_status = f'unavailable: {exc}'
+        log_event('screen-capture-unavailable', reason=screen_capture_status)
         print(f'Screen capture {screen_capture_status}')
         print('Restore bridge_runtime/assets/portraits/library.npz to enable screen recognition.')
         return
@@ -146,7 +189,10 @@ def _run_screen_capture(stop_event):
     if screen_capture_status.startswith('capture not bound — No window titled'):
         screen_capture_status = 'waiting for the Dota 2 window (use borderless windowed mode)'
     print(f'Dota screen reader: {screen_capture_status}')
+    log_event('screen-capture-started', status=screen_capture_status)
     last_screen_draft = None
+    last_snapshot_signature = None
+    last_rejected_snapshot_signature = None
     last_error = ''
     last_watch_generation = -1
 
@@ -164,7 +210,10 @@ def _run_screen_capture(stop_event):
             stop_event.wait(0.25)
             continue
 
-        session.set_required(True)
+        # Without GSI, let the bundled screen detector decide whether the
+        # current Dota view is a draft. It periodically probes idle screens,
+        # so a missed gate does not permanently suppress recognition.
+        session.set_required(None)
         try:
             snapshot = provider.poll()
             last_error = ''
@@ -172,6 +221,7 @@ def _run_screen_capture(stop_event):
             message = str(exc)
             if message != last_error:
                 print(f'Screen capture error: {message}')
+                log_event('screen-capture-error', error=message)
                 last_error = message
             screen_capture_status = f'error: {message}'
             stop_event.wait(1.0)
@@ -180,19 +230,51 @@ def _run_screen_capture(stop_event):
         if snapshot.source and snapshot.source != screen_capture_status:
             screen_capture_status = snapshot.source
             print(f'Dota screen reader: {screen_capture_status}')
+            log_event('screen-capture-status', status=screen_capture_status)
 
-        screen_draft = screen_draft_from_snapshot(snapshot, hero_names)
-        if _screen_draft_is_reliable(screen_draft) and screen_draft != last_screen_draft:
+        snapshot_state = {
+            'mode': snapshot.mode,
+            'source': snapshot.source,
+            'radiant_ids': list(snapshot.left or []),
+            'dire_ids': list(snapshot.right or []),
+            'unknown_slots': snapshot.unknown,
+            'gate_score': snapshot.gate_score,
+        }
+        snapshot_signature = json.dumps(snapshot_state, sort_keys=True)
+        if snapshot_signature != last_snapshot_signature:
+            log_event('screen-read', **snapshot_state)
+            last_snapshot_signature = snapshot_signature
+
+        if snapshot.mode == 'draft':
+            screen_draft = screen_draft_from_snapshot(snapshot, hero_names)
+            duplicate_heroes = _screen_snapshot_has_duplicate_heroes(snapshot, hero_names)
+            if duplicate_heroes:
+                if snapshot_signature != last_rejected_snapshot_signature:
+                    log_event(
+                        'screen-draft-rejected',
+                        reason='duplicate-hero-id',
+                        radiant_ids=list(snapshot.left or []),
+                        dire_ids=list(snapshot.right or []),
+                    )
+                    last_rejected_snapshot_signature = snapshot_signature
+            elif _screen_draft_is_reliable(screen_draft) and screen_draft != last_screen_draft:
+                with lock:
+                    draft = {**screen_draft, 'updated': time()}
+                    last_screen_draft = screen_draft
+                print('\n=== SCREEN DRAFT UPDATE ===')
+                print(json.dumps(screen_draft, ensure_ascii=False, indent=2))
+                log_event('screen-draft', **screen_draft)
+        elif last_screen_draft is not None:
             with lock:
-                draft = {**screen_draft, 'updated': time()}
-                last_screen_draft = screen_draft
-            print('\n=== SCREEN DRAFT UPDATE ===')
-            print(json.dumps(screen_draft, ensure_ascii=False, indent=2))
+                draft = {'radiant': [], 'dire': [], 'updated': 0}
+            last_screen_draft = None
+            log_event('screen-draft-cleared', reason='draft-screen-not-detected')
 
         stop_event.wait(0.25)
 
     provider.stop()
     screen_capture_status = 'stopped'
+    log_event('screen-capture-stopped')
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -230,7 +312,7 @@ class Handler(BaseHTTPRequestHandler):
             with lock:
                 current = recommendations.copy()
             if time() - current['updated'] > 8:
-                current = {'side': '', 'items': [], 'updated': 0}
+                current = {'radiant': [], 'dire': [], 'updated': 0}
             return self._send(200, current)
 
         return self._send(404, {'error': 'Not found'})
@@ -244,9 +326,10 @@ class Handler(BaseHTTPRequestHandler):
                 draft = {'radiant': [], 'dire': [], 'updated': 0}
                 reset_generation += 1
                 generation = reset_generation
+            log_event('draft-reset', generation=generation)
             return self._send(200, {'ok': True, 'reset_generation': generation})
 
-        if self.path not in ('/draft', '/recommendations', '/watching'):
+        if self.path not in ('/draft', '/log', '/recommendations', '/watching'):
             return self._send(404, {'error': 'Not found'})
 
         try:
@@ -265,26 +348,40 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(400, {'error': str(exc)})
                 return self._send(200, {'ok': True, **state})
 
-            if self.path == '/recommendations':
-                side = payload.get('side')
-                items = payload.get('items', [])
-                if side not in ('Radiant', 'Dire') or not isinstance(items, list):
-                    return self._send(400, {'error': 'Expected side and items'})
+            if self.path == '/log':
+                event = str(payload.get('event', '')).strip()[:64]
+                details = payload.get('details', {})
+                if not event or not isinstance(details, dict):
+                    return self._send(400, {'error': 'Expected event and details'})
+                log_event(f'extension.{event}', **details)
+                return self._send(200, {'ok': True})
 
-                cleaned = []
-                for item in items[:5]:
-                    if not isinstance(item, dict):
-                        continue
-                    name = str(item.get('name', '')).strip()[:64]
-                    if not name:
-                        continue
-                    cleaned.append({
-                        'name': name,
-                        'role': str(item.get('role', '')).strip()[:32],
-                        'matches': str(item.get('matches', '')).strip()[:32],
-                    })
+            if self.path == '/recommendations':
+                radiant = payload.get('radiant', [])
+                dire = payload.get('dire', [])
+                if not isinstance(radiant, list) or not isinstance(dire, list):
+                    return self._send(400, {'error': 'Expected radiant and dire recommendation arrays'})
+
+                def clean_items(items):
+                    cleaned = []
+                    for item in items[:5]:
+                        if not isinstance(item, dict):
+                            continue
+                        name = str(item.get('name', '')).strip()[:64]
+                        if not name:
+                            continue
+                        cleaned.append({
+                            'name': name,
+                            'role': str(item.get('role', '')).strip()[:32],
+                            'matches': str(item.get('matches', '')).strip()[:32],
+                        })
+                    return cleaned
                 with lock:
-                    recommendations = {'side': side, 'items': cleaned, 'updated': time()}
+                    recommendations = {
+                        'radiant': clean_items(radiant),
+                        'dire': clean_items(dire),
+                        'updated': time(),
+                    }
                 return self._send(200, {'ok': True})
 
             radiant = payload.get('radiant', [])
@@ -318,26 +415,17 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Dota screen -> D2PT Drafter bridge.')
     parser.add_argument('--port', type=int, default=DEFAULT_PORT)
     args = parser.parse_args()
+    _configure_logging()
 
     print(f'D2PT Draft Bridge running at http://{HOST}:{args.port}')
     print(f'Draft endpoint: http://127.0.0.1:{args.port}/draft')
+    print(f'Log file: {LOG_PATH}')
+    log_event('bridge-started', port=args.port)
     try:
         server = BridgeServer((HOST, args.port), Handler)
     except OSError as exc:
         print(f'Another bridge is already using port {args.port}: {exc}')
         raise SystemExit(1)
-
-    panel_script = Path(__file__).resolve().with_name('recommendation_panel.py')
-    panel_python = Path(sys.executable).with_name('pythonw.exe')
-    if panel_script.is_file() and panel_python.is_file():
-        try:
-            subprocess.Popen(
-                [str(panel_python), str(panel_script)],
-                cwd=str(panel_script.parent),
-                close_fds=True,
-            )
-        except OSError as exc:
-            print(f'Recommendation panel could not start: {exc}')
 
     stop_capture = Event()
     Thread(target=_run_screen_capture, args=(stop_capture,), daemon=True).start()
@@ -349,3 +437,4 @@ if __name__ == '__main__':
     finally:
         stop_capture.set()
         server.server_close()
+        log_event('bridge-stopped')

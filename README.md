@@ -10,8 +10,8 @@ Game State Integration (GSI), launch the Dota Draft Assist desktop app, read gam
 - `bridge.py` runs the local HTTP service and screen reader.
 - `bridge_runtime/` contains the Python environment, capture/recognition modules, and portrait library required by the bridge. It is a reduced
   runtime, not the full Dota Draft Assist project.
-- `recommendation_panel.py` shows D2PT's active-side top picks in an always-on-top window. Clicking a row copies the hero name; it does not select a
-  hero in Dota.
+- The Chrome extension shows D2PT's active-side top picks in a compact page overlay. Clicking a row copies the hero name; it does not select a hero
+  in Dota.
 - `extension/` is the unpacked Chrome extension.
 - `start-bridge.bat` starts the bridge directly.
 - `start-bridge-minimized.bat` starts the bridge in a minimized window.
@@ -19,12 +19,11 @@ Game State Integration (GSI), launch the Dota Draft Assist desktop app, read gam
 
 ## Start
 
-1. Run `start-bridge-minimized.bat` and leave the bridge window open. This also opens the recommendations panel. To keep the console visible, run
-   `start-bridge.bat` instead.
+1. Run `start-bridge-minimized.bat` and leave the bridge window open. To keep the console visible, run `start-bridge.bat` instead.
 2. In Chrome, open `chrome://extensions`, enable Developer mode, select **Load unpacked**, and choose the `extension` folder.
 3. Open https://dota2protracker.com/drafter and refresh the page.
 4. Keep Dota visible during hero selection. Fullscreen is supported when the screen reader reports that it is capturing Dota.
-5. The panel shows the active Radiant/Dire side's five highest-ranked D2PT picks. Click a name to copy it, then select the hero manually in Dota.
+5. The Chrome overlay shows the active Radiant/Dire side's five highest-ranked D2PT picks. Click a name to copy it, then select the hero manually in Dota.
 
 To send picks manually:
 
