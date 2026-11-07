@@ -2,8 +2,9 @@
 
 Windows bridge that reads Dota 2 draft picks and fills empty hero slots on the Dota2ProTracker Drafter page.
 
-The bridge reads hero portraits from the Dota window and serves the current draft to the Chrome extension on `127.0.0.1:8765`. It does not use
-Game State Integration (GSI), launch the Dota Draft Assist desktop app, read game memory, or send input to Dota.
+The bridge reads hero portraits from the Dota window and serves the current draft to the Chrome extension on `127.0.0.1:8765`. It uses
+Dota's Game State Integration (GSI) to enable automatic capture during hero selection and strategy time when the local player is on Radiant or Dire.
+Manual picks also work without GSI.
 
 ## What's In The Folder
 
@@ -25,6 +26,22 @@ Game State Integration (GSI), launch the Dota Draft Assist desktop app, read gam
 4. Keep Dota visible during hero selection. Fullscreen is supported when the screen reader reports that it is capturing Dota.
 5. The Chrome overlay shows the active Radiant/Dire side's five highest-ranked D2PT picks. Click a name to copy it, then select the hero manually in Dota.
 
+For automatic picks, add `-gamestateintegration` to Dota's Steam launch options and restart Dota after configuring GSI.
+In Dota's `game/dota/cfg/gamestate_integration` folder, configure `gamestate_integration_d2pt.cfg` as follows.
+
+```text
+"D2PT Draft Bridge"
+{
+    "uri" "http://127.0.0.1:8765/gsi"
+    "heartbeat" "30"
+    "data"
+    {
+        "map" "1"
+        "player" "1"
+    }
+}
+```
+
 To send picks manually:
 
 ```powershell
@@ -33,7 +50,7 @@ To send picks manually:
 
 ## Check The Bridge
 
-- `http://127.0.0.1:8765/health` should return `{"ok":true,"service":"D2PT Draft Bridge"}`.
+- `http://127.0.0.1:8765/health` shows service health, whether GSI is connected, and whether Dota has confirmed hero selection or strategy time.
 - `http://127.0.0.1:8765/draft` shows the current draft feed.
 - If screen recognition reports a missing portrait library, restore `bridge_runtime/assets/portraits/library.npz` from the original Dota Draft Assist
   files. The reduced runtime does not include portrait sources or the builder.

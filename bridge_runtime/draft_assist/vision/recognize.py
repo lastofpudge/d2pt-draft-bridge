@@ -74,7 +74,8 @@ def match_crop(crop: np.ndarray, lib: Library,
     if crop.size == 0:
         return None, "(empty crop — layout off screen?)", 10 ** 6, 0
     grey = crop if crop.ndim == 2 else cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-    if float(grey.std()) < params.flat_std:
+    std_val = float(grey.std())
+    if std_val < params.flat_std or (float(grey.mean()) < 20.0 and std_val < 10.0):
         return EMPTY_SLOT, "(flat placeholder)", 0, params.bits
     return _match_queries([phash(crop, params.hash_size)], lib, params)
 
@@ -88,7 +89,8 @@ def match_slot(frame: np.ndarray, rect: SlotRect, lib: Library,
     if central.size == 0:
         return None, "(empty crop — layout off screen?)", 10 ** 6, 0
     grey = cv2.cvtColor(central, cv2.COLOR_BGR2GRAY)
-    if float(grey.std()) < params.flat_std:
+    std_val = float(grey.std())
+    if std_val < params.flat_std or (float(grey.mean()) < 20.0 and std_val < 10.0):
         return EMPTY_SLOT, "(flat placeholder)", 0, params.bits
 
     queries = []

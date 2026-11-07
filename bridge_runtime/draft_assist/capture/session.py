@@ -64,9 +64,7 @@ PROBE_PERIOD = 3.0
 # menu produces.
 PROBE_SLOTS = 2
 # A reading survives this long of continuous idle before it is forgotten.
-# Four missed gate checks is four seconds, and a pick does not un-pick in
-# four seconds; thirty seconds of not-the-draft-screen is another game.
-FORGET_AFTER = 30.0
+FORGET_AFTER = 15.0
 
 
 @dataclass

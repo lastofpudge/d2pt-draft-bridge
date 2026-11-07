@@ -6,7 +6,7 @@ import json
 import sys
 from pathlib import Path
 from threading import Event, Lock, Thread
-from time import time
+from time import monotonic, time
 from logging.handlers import RotatingFileHandler
 
 HOST = '127.0.0.1'
@@ -19,6 +19,13 @@ reset_generation = 0
 watching_enabled = True
 watch_generation = 0
 screen_capture_status = 'starting'
+gsi_state = None
+gsi_received_at = 0.0
+gsi_generation = 0
+automatic_draft = None
+GSI_TIMEOUT = 40.0
+HERO_SELECTION = 'DOTA_GAMERULES_STATE_HERO_SELECTION'
+DRAFT_PHASES = {HERO_SELECTION, 'DOTA_GAMERULES_STATE_STRATEGY_TIME'}
 logger = logging.getLogger('d2pt_bridge')
 
 
@@ -35,6 +42,51 @@ def _configure_logging():
 
 def log_event(event, **details):
     logger.info('%s %s', event, json.dumps(details, ensure_ascii=False, sort_keys=True))
+
+
+def _gsi_allows_capture():
+    return (
+        gsi_state is not None
+        and gsi_state[0] in DRAFT_PHASES
+        and gsi_state[1] in ('radiant', 'dire')
+        and monotonic() - gsi_received_at <= GSI_TIMEOUT
+    )
+
+
+def _clear_automatic_draft():
+    global draft, automatic_draft
+    if automatic_draft is not None and draft is automatic_draft:
+        draft = {'radiant': [], 'dire': [], 'updated': 0}
+        log_event('screen-draft-cleared', reason='gsi-draft-ended')
+    automatic_draft = None
+
+
+def _receive_gsi(payload):
+    global gsi_state, gsi_received_at, gsi_generation
+    map_state = payload.get('map', {})
+    player = payload.get('player', {})
+    if not isinstance(map_state, dict) or not isinstance(player, dict):
+        raise ValueError('Expected GSI map and player objects')
+    phase = str(map_state.get('game_state', ''))[:80]
+    team = str(player.get('team_name', '')).lower()
+    if team not in ('radiant', 'dire'):
+        team = ''
+    state = (phase, team, str(map_state.get('matchid', '')))
+    with lock:
+        was_active = _gsi_allows_capture()
+        if state != gsi_state:
+            log_event('gsi-state', phase=phase, player_team=team)
+        continuing_draft = (
+            was_active and phase in DRAFT_PHASES and gsi_state[1:] == state[1:]
+        )
+        if state != gsi_state and not continuing_draft:
+            gsi_generation += 1
+            _clear_automatic_draft()
+        elif not was_active and phase in DRAFT_PHASES and team:
+            gsi_generation += 1
+            _clear_automatic_draft()
+        gsi_state = state
+        gsi_received_at = monotonic()
 
 
 def _set_watching(enabled):
@@ -56,25 +108,27 @@ HERO_ID_MAP = {
     21: 'Windranger', 22: 'Zeus', 23: 'Kunkka', 25: 'Lina', 26: 'Lion', 27: 'Shadow Shaman',
     28: 'Slardar', 29: 'Tidehunter', 30: 'Witch Doctor', 31: 'Lich', 32: 'Riki',
     33: 'Enigma', 34: 'Tinker', 35: 'Sniper', 36: 'Necrophos', 37: 'Warlock',
-    38: 'Queen of Pain', 39: 'Venomancer', 40: 'Faceless Void', 41: 'Wraith King',
+    38: 'Beastmaster', 39: 'Queen of Pain', 40: 'Venomancer', 41: 'Faceless Void',
     42: 'Wraith King', 43: 'Death Prophet', 44: 'Phantom Assassin', 45: 'Pugna',
     46: 'Templar Assassin', 47: 'Viper', 48: 'Luna', 49: 'Dragon Knight', 50: 'Dazzle',
     51: 'Clockwerk', 52: 'Leshrac', 53: "Nature's Prophet", 54: 'Lifestealer',
     55: 'Dark Seer', 56: 'Clinkz', 57: 'Omniknight', 58: 'Enchantress', 59: 'Huskar',
     60: 'Night Stalker', 61: 'Broodmother', 62: 'Bounty Hunter', 63: 'Weaver',
-    64: 'Jakiro', 65: 'Batrider', 66: 'Chen', 67: 'Spectre', 68: 'Doom', 69: 'Ancient Apparition',
-    70: 'Elder Titan', 71: 'Earth Spirit', 72: 'Spirit Breaker', 73: 'Abaddon',
-    74: 'Legion Commander', 75: 'Techies', 76: 'Ember Spirit', 77: 'Underlord',
-    78: 'Tusk', 79: 'Timbersaw', 80: 'Bristleback', 81: 'Chaos Knight',
-    82: 'Treant Protector', 83: 'Ogre Magi', 84: 'Undying', 85: 'Rubick',
-    86: 'Disruptor', 87: 'Nyx Assassin', 88: 'Hoodwink', 89: 'Void Spirit',
-    90: 'Visage', 91: 'Slark', 92: 'Medusa', 93: 'Troll Warlord',
-    94: 'Centaur Warrunner', 95: 'Magnus', 96: 'Timbersaw', 97: 'Bristleback',
-    98: 'Tusk', 99: 'Skywrath Mage', 100: 'Abaddon', 101: 'Outworld Destroyer',
-    102: 'Shadow Fiend', 103: 'Monkey King', 104: 'Arc Warden', 105: 'Pangolier',
-    106: 'Dark Willow', 107: 'Grimstroke', 108: 'Mars', 109: 'Snapfire', 110: 'Void Spirit',
-    111: 'Hoodwink', 112: 'Dawnbreaker', 113: 'Muerta', 114: 'Marci', 115: 'Primal Beast',
-    116: 'Ringmaster', 117: 'Kez'
+    64: 'Jakiro', 65: 'Batrider', 66: 'Chen', 67: 'Spectre', 68: 'Ancient Apparition',
+    69: 'Doom', 70: 'Ursa', 71: 'Spirit Breaker', 72: 'Gyrocopter', 73: 'Alchemist',
+    74: 'Invoker', 75: 'Silencer', 76: 'Outworld Destroyer', 77: 'Lycan', 78: 'Brewmaster',
+    79: 'Shadow Demon', 80: 'Lone Druid', 81: 'Chaos Knight', 82: 'Meepo',
+    83: 'Treant Protector', 84: 'Ogre Magi', 85: 'Undying', 86: 'Rubick',
+    87: 'Disruptor', 88: 'Nyx Assassin', 89: 'Naga Siren', 90: 'Keeper of the Light',
+    91: 'Io', 92: 'Visage', 93: 'Slark', 94: 'Medusa', 95: 'Troll Warlord',
+    96: 'Centaur Warrunner', 97: 'Magnus', 98: 'Timbersaw', 99: 'Bristleback',
+    100: 'Tusk', 101: 'Skywrath Mage', 102: 'Abaddon', 103: 'Elder Titan',
+    104: 'Legion Commander', 105: 'Techies', 106: 'Ember Spirit', 107: 'Earth Spirit',
+    108: 'Underlord', 109: 'Terrorblade', 110: 'Phoenix', 111: 'Oracle',
+    112: 'Winter Wyvern', 113: 'Arc Warden', 114: 'Monkey King', 119: 'Dark Willow',
+    120: 'Pangolier', 121: 'Grimstroke', 123: 'Hoodwink', 126: 'Void Spirit',
+    128: 'Snapfire', 129: 'Mars', 131: 'Ringmaster', 135: 'Dawnbreaker',
+    136: 'Marci', 137: 'Primal Beast', 138: 'Muerta', 145: 'Kez', 155: 'Largo'
 }
 
 
@@ -82,21 +136,28 @@ def screen_draft_from_snapshot(snapshot, hero_names):
     if snapshot is None:
         return None
 
-    def names(ids):
-        result = []
-        for hero_id in ids:
-            try:
+    def names_by_slot(team_name):
+        slots = [None] * 5
+        read = getattr(snapshot, 'read', None)
+        if read and getattr(read, 'slots', None):
+            for s in read.slots:
+                if getattr(s, 'rect', None) and s.rect.team == team_name and 0 <= s.rect.slot < 5:
+                    if s.hero_id is not None and s.hero_id > 0:
+                        name = hero_names.get(int(s.hero_id), '')
+                        if name:
+                            slots[s.rect.slot] = str(name).strip()
+            return slots
+        ids = getattr(snapshot, 'left' if team_name == 'radiant' else 'right', []) or []
+        for i, hero_id in enumerate(ids[:5]):
+            if hero_id is not None and hero_id > 0:
                 name = hero_names.get(int(hero_id), '')
-            except (TypeError, ValueError):
-                name = ''
-            name = str(name).strip()
-            if name and name not in result:
-                result.append(name)
-        return result[:5]
+                if name:
+                    slots[i] = str(name).strip()
+        return slots
 
-    radiant = names(getattr(snapshot, 'left', []))
-    dire = names(getattr(snapshot, 'right', []))
-    if not radiant and not dire:
+    radiant = names_by_slot('radiant')
+    dire = names_by_slot('dire')
+    if not any(radiant) and not any(dire):
         return None
     return {'radiant': radiant, 'dire': dire}
 
@@ -104,19 +165,31 @@ def screen_draft_from_snapshot(snapshot, hero_names):
 def _screen_draft_is_reliable(screen_draft):
     if not screen_draft:
         return False
-    return bool(screen_draft['radiant'] or screen_draft['dire'])
+    return any(screen_draft.get('radiant', [])) or any(screen_draft.get('dire', []))
 
 
 def _screen_snapshot_has_duplicate_heroes(snapshot, hero_names):
-    """A Dota draft cannot contain the same hero twice on one side.
+    """A Dota draft cannot contain the same hero twice across all 10 slots."""
+    seen = set()
+    read = getattr(snapshot, 'read', None)
+    if read and getattr(read, 'slots', None):
+        for s in read.slots:
+            if s.hero_id is not None and s.hero_id > 0:
+                try:
+                    hid = int(s.hero_id)
+                except (TypeError, ValueError):
+                    continue
+                if hid not in hero_names:
+                    continue
+                if hid in seen:
+                    return True
+                seen.add(hid)
+        return False
 
-    The portrait detector occasionally repeats the previous slot's ID while a
-    portrait is animating.  Treat that as an unreadable frame rather than
-    publishing a shortened, shifted draft to the browser.
-    """
     for side in ('left', 'right'):
-        seen = set()
         for hero_id in getattr(snapshot, side, []) or []:
+            if hero_id is None:
+                continue
             try:
                 hero_id = int(hero_id)
             except (TypeError, ValueError):
@@ -147,12 +220,17 @@ def _load_screen_hero_names(runtime_root):
                 continue
             name = hero.get('localized_name')
             if isinstance(name, str) and name.strip():
-                names[hero_id] = name.strip()
+                clean_name = name.strip()
+                if clean_name == 'Outworld Devourer':
+                    clean_name = 'Outworld Destroyer'
+                elif clean_name == 'Ring Master':
+                    clean_name = 'Ringmaster'
+                names[hero_id] = clean_name
     return names or HERO_ID_MAP.copy()
 
 
-def _run_screen_capture(stop_event):
-    global draft, screen_capture_status
+def _run_screen_capture(stop_event, debug_dir=None):
+    global draft, automatic_draft, screen_capture_status
 
     runtime_root = Path(__file__).resolve().parent / 'bridge_runtime'
     if not runtime_root.is_dir():
@@ -185,35 +263,48 @@ def _run_screen_capture(stop_event):
         print('Restore bridge_runtime/assets/portraits/library.npz to enable screen recognition.')
         return
 
-    screen_capture_status = provider.start()
-    if screen_capture_status.startswith('capture not bound — No window titled'):
-        screen_capture_status = 'waiting for the Dota 2 window (use borderless windowed mode)'
-    print(f'Dota screen reader: {screen_capture_status}')
-    log_event('screen-capture-started', status=screen_capture_status)
+    screen_capture_status = 'waiting for confirmed hero selection'
     last_screen_draft = None
     last_snapshot_signature = None
     last_rejected_snapshot_signature = None
     last_error = ''
-    last_watch_generation = -1
+    last_capture_generation = None
+    capture_running = False
+    retry_capture_at = 0.0
+    debug_capture_at = 0.0
 
     while not stop_event.is_set():
         with lock:
-            enabled = watching_enabled
-            current_watch_generation = watch_generation
+            enabled = watching_enabled and _gsi_allows_capture()
+            capture_generation = (watch_generation, reset_generation, gsi_generation)
+            if not enabled:
+                _clear_automatic_draft()
 
-        if current_watch_generation != last_watch_generation:
+        if not enabled or capture_generation != last_capture_generation:
+            session.forget_reading()
             last_screen_draft = None
-            last_watch_generation = current_watch_generation
+            last_capture_generation = capture_generation
 
         if not enabled:
             session.set_required(False)
+            if capture_running:
+                provider.stop()
+                capture_running = False
+            screen_capture_status = 'waiting for confirmed hero selection'
             stop_event.wait(0.25)
             continue
 
-        # Without GSI, let the bundled screen detector decide whether the
-        # current Dota view is a draft. It periodically probes idle screens,
-        # so a missed gate does not permanently suppress recognition.
-        session.set_required(None)
+        session.set_required(True)
+        if not capture_running:
+            if monotonic() < retry_capture_at:
+                stop_event.wait(0.25)
+                continue
+            screen_capture_status = provider.start()
+            log_event('screen-capture-started', status=screen_capture_status)
+            retry_capture_at = monotonic() + 5.0
+            if not screen_capture_status.startswith('capturing window '):
+                continue
+            capture_running = True
         try:
             snapshot = provider.poll()
             last_error = ''
@@ -227,10 +318,47 @@ def _run_screen_capture(stop_event):
             stop_event.wait(1.0)
             continue
 
+        if snapshot.stalled or not snapshot.frames_arrived:
+            if monotonic() >= retry_capture_at:
+                log_event('screen-capture-rebind', frames_arrived=snapshot.frames_arrived)
+                provider.stop()
+                session.forget_reading()
+                capture_running = False
+            stop_event.wait(0.25)
+            continue
+
         if snapshot.source and snapshot.source != screen_capture_status:
             screen_capture_status = snapshot.source
             print(f'Dota screen reader: {screen_capture_status}')
             log_event('screen-capture-status', status=screen_capture_status)
+
+        if debug_dir is not None and snapshot.frame is not None and monotonic() >= debug_capture_at:
+            debug_capture_at = monotonic() + 2.0
+            try:
+                cv2 = importlib.import_module('cv2')
+                debug_dir.mkdir(parents=True, exist_ok=True)
+                cv2.imwrite(str(debug_dir / 'latest.png'), snapshot.frame)
+                raw_slots = getattr(snapshot.read_raw, 'slots', [])
+                details = {
+                    'updated': time(),
+                    'frame_size': list(snapshot.frame.shape),
+                    'frames_arrived': snapshot.frames_arrived,
+                    'frozen_for': snapshot.frozen_for,
+                    'slots': [{
+                        'team': slot.rect.team,
+                        'slot': slot.rect.slot,
+                        'hero_id': slot.hero_id,
+                        'label': slot.best_label,
+                        'distance': slot.distance,
+                        'margin': slot.margin,
+                        'rect': list(slot.rect.to_pixels(
+                            snapshot.frame.shape[1], snapshot.frame.shape[0])),
+                    } for slot in raw_slots],
+                }
+                (debug_dir / 'latest.json').write_text(
+                    json.dumps(details, indent=2), encoding='utf-8')
+            except Exception as exc:
+                log_event('debug-capture-error', error=str(exc))
 
         snapshot_state = {
             'mode': snapshot.mode,
@@ -245,31 +373,29 @@ def _run_screen_capture(stop_event):
             log_event('screen-read', **snapshot_state)
             last_snapshot_signature = snapshot_signature
 
-        if snapshot.mode == 'draft':
-            screen_draft = screen_draft_from_snapshot(snapshot, hero_names)
-            duplicate_heroes = _screen_snapshot_has_duplicate_heroes(snapshot, hero_names)
-            if duplicate_heroes:
-                if snapshot_signature != last_rejected_snapshot_signature:
-                    log_event(
-                        'screen-draft-rejected',
-                        reason='duplicate-hero-id',
-                        radiant_ids=list(snapshot.left or []),
-                        dire_ids=list(snapshot.right or []),
-                    )
-                    last_rejected_snapshot_signature = snapshot_signature
-            elif _screen_draft_is_reliable(screen_draft) and screen_draft != last_screen_draft:
+        screen_draft = screen_draft_from_snapshot(snapshot, hero_names)
+        duplicate_heroes = _screen_snapshot_has_duplicate_heroes(snapshot, hero_names)
+
+        if duplicate_heroes:
+            if snapshot_signature != last_rejected_snapshot_signature:
+                log_event(
+                    'screen-draft-rejected',
+                    reason='duplicate-hero-id',
+                    radiant_ids=list(snapshot.left or []),
+                    dire_ids=list(snapshot.right or []),
+                )
+                last_rejected_snapshot_signature = snapshot_signature
+        elif snapshot.source == "capturing 'Dota 2'" and _screen_draft_is_reliable(screen_draft):
+            if screen_draft != last_screen_draft:
                 with lock:
-                    draft = {**screen_draft, 'updated': time()}
+                    if (not watching_enabled or not _gsi_allows_capture()
+                            or capture_generation != (watch_generation, reset_generation, gsi_generation)):
+                        continue
+                    draft = automatic_draft = {**screen_draft, 'updated': time()}
                     last_screen_draft = screen_draft
                 print('\n=== SCREEN DRAFT UPDATE ===')
                 print(json.dumps(screen_draft, ensure_ascii=False, indent=2))
                 log_event('screen-draft', **screen_draft)
-        elif last_screen_draft is not None:
-            with lock:
-                draft = {'radiant': [], 'dire': [], 'updated': 0}
-            last_screen_draft = None
-            log_event('screen-draft-cleared', reason='draft-screen-not-detected')
-
         stop_event.wait(0.25)
 
     provider.stop()
@@ -294,14 +420,23 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == '/health':
+            with lock:
+                gsi_phase = gsi_state[0] if gsi_state else ''
+                gsi_fresh = gsi_state is not None and monotonic() - gsi_received_at <= GSI_TIMEOUT
+                gsi_drafting = _gsi_allows_capture()
             return self._send(200, {
                 'ok': True,
                 'service': 'D2PT Draft Bridge',
                 'screen_capture': screen_capture_status,
+                'gsi_phase': gsi_phase,
+                'gsi_connected': gsi_fresh,
+                'gsi_drafting': gsi_drafting,
             })
 
         if self.path == '/draft':
             with lock:
+                if not _gsi_allows_capture():
+                    _clear_automatic_draft()
                 return self._send(200, {
                     **draft,
                     'reset_generation': reset_generation,
@@ -329,7 +464,7 @@ class Handler(BaseHTTPRequestHandler):
             log_event('draft-reset', generation=generation)
             return self._send(200, {'ok': True, 'reset_generation': generation})
 
-        if self.path not in ('/draft', '/log', '/recommendations', '/watching'):
+        if self.path not in ('/draft', '/gsi', '/log', '/recommendations', '/watching'):
             return self._send(404, {'error': 'Not found'})
 
         try:
@@ -340,6 +475,10 @@ class Handler(BaseHTTPRequestHandler):
             payload = json.loads(self.rfile.read(size).decode('utf-8'))
             if not isinstance(payload, dict):
                 return self._send(400, {'error': 'Expected a JSON object'})
+
+            if self.path == '/gsi':
+                _receive_gsi(payload)
+                return self._send(200, {'ok': True})
 
             if self.path == '/watching':
                 try:
@@ -414,6 +553,7 @@ class BridgeServer(ThreadingHTTPServer):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Dota screen -> D2PT Drafter bridge.')
     parser.add_argument('--port', type=int, default=DEFAULT_PORT)
+    parser.add_argument('--debug-dir', type=Path, help='Save the latest draft frame and slot readings')
     args = parser.parse_args()
     _configure_logging()
 
@@ -428,7 +568,7 @@ if __name__ == '__main__':
         raise SystemExit(1)
 
     stop_capture = Event()
-    Thread(target=_run_screen_capture, args=(stop_capture,), daemon=True).start()
+    Thread(target=_run_screen_capture, args=(stop_capture, args.debug_dir), daemon=True).start()
     print('Keep this window open. Press Ctrl+C to stop.')
     try:
         server.serve_forever()

@@ -3,7 +3,10 @@
 	const logUrl = 'http://127.0.0.1:8765/log'
 	const recommendationsUrl = 'http://127.0.0.1:8765/recommendations'
 	let busy = false
+	let applyingDraft = false
 	let lastPayloadSignature = ''
+	let failedPayloadSignature = ''
+	let failedPayloadRetries = 0
 	let lastRecommendationsSignature = ''
 	let lastRecommendationsSentAt = 0
 	let lastNoRecommendationsNoticeAt = 0
@@ -182,13 +185,30 @@
 		return requested || slots.find(button => /^pick$/i.test(button.innerText.trim())) || null
 	}
 
+	const HERO_SEARCH_ALIASES = {
+		'outworlddevourer': 'outworld destroyer',
+		'outworlddestroyer': 'outworld devourer',
+		'ringmaster': 'ring master',
+		'ring master': 'ringmaster',
+		'naturesprophet': 'nature',
+		'centaurwarrunner': 'centaur',
+		'timbersaw': 'timber',
+		'treantprotector': 'treant',
+		'clockwerk': 'clock',
+	}
+
 	function hasHeroOnSide(side, heroName) {
 		const target = normalize(heroName)
+		const queryText = HERO_SEARCH_ALIASES[target] || heroName
+		const targetAlias = normalize(queryText)
 		const lowerSide = side.toLowerCase()
 		return [...document.querySelectorAll('button[aria-label]')].some(button => {
 			const label = (button.getAttribute('aria-label') || '').toLowerCase()
 			if (!label.startsWith(`change ${lowerSide} slot `)) return false
-			return [...button.querySelectorAll('img[alt]')].some(image => normalize(image.alt) === target)
+			return [...button.querySelectorAll('img[alt]')].some(image => {
+				const n = normalize(image.alt)
+				return n === target || n === targetAlias
+			})
 		})
 	}
 
@@ -200,9 +220,14 @@
 	}
 
 	function setInputValue(input, value) {
+		const lastValue = input.value
+		input.value = value
+		const tracker = input._valueTracker
+		if (tracker) {
+			tracker.setValue(lastValue)
+		}
 		const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
 		if (setter) setter.call(input, value)
-		else input.value = value
 
 		input.dispatchEvent(new Event('input', { bubbles: true }))
 		input.dispatchEvent(new Event('change', { bubbles: true }))
@@ -214,20 +239,32 @@
 			const label = `${input.placeholder} ${input.getAttribute('aria-label') || ''}`.toLowerCase()
 			return /search\s+heroes/.test(label) && !/players|account|teams|tournaments/.test(label)
 		})
-		if (!pickerSearch) return
-
-		document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }))
+		const modal = document.querySelector('[role="dialog"], [class*="picker" i], [class*="modal" i]')
+		if (pickerSearch || (modal && visible(modal))) {
+			const sendEsc = target => {
+				if (!target) return
+				target.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true, cancelable: true }))
+				target.dispatchEvent(new KeyboardEvent('keyup', { key: 'Escape', code: 'Escape', bubbles: true, cancelable: true }))
+			}
+			sendEsc(pickerSearch)
+			if (document.activeElement && document.activeElement !== document.body) {
+				sendEsc(document.activeElement)
+			}
+			sendEsc(document)
+		}
 	}
 
 	async function findHeroButton(heroName) {
 		const target = normalize(heroName)
+		const queryText = HERO_SEARCH_ALIASES[target] || heroName
+		const targetAlias = normalize(queryText)
 		const findSearch = () =>
 			[...document.querySelectorAll('input')].find(input => {
 				if (!visible(input)) return false
 				const label = `${input.placeholder} ${input.getAttribute('aria-label') || ''}`.toLowerCase()
 				return /search\s+heroes/.test(label) && !/players|account|teams|tournaments/.test(label)
 			})
-		const search = await waitFor(findSearch)
+		const search = await waitFor(findSearch, 1500, 30)
 
 		if (!search) {
 			bridgeLog('hero-search', { heroName, searchFound: false })
@@ -236,7 +273,18 @@
 		}
 
 		bridgeLog('hero-search', { heroName, searchFound: true })
-		setInputValue(search, heroName)
+		setInputValue(search, queryText)
+
+		const isMatch = (val) => {
+			if (!val) return false
+			const n = normalize(val)
+			if (n === target || n === targetAlias) return true
+			// Substring matches only for longer names (>= 4 chars) to prevent Io matching Lion
+			if (target.length >= 4 && (n.includes(target) || n.startsWith(target))) return true
+			if (targetAlias.length >= 4 && (n.includes(targetAlias) || n.startsWith(targetAlias))) return true
+			return false
+		}
+
 		const findMatch = () => {
 			const picker = findSearch()?.closest(
 				'[role="dialog"], [class*="picker" i], [class*="overlay" i], [class*="modal" i], [class*="fixed" i], .fixed, [style*="fixed"]',
@@ -246,14 +294,14 @@
 			return [...picker.querySelectorAll('button')].find(button => {
 				if (!visible(button)) return false
 				const image = button.querySelector('img[alt]')
+				const imgAlt = image?.alt
 				const lines = button.innerText
 					.split(/\r?\n/)
-					.map(line => normalize(line))
 					.filter(Boolean)
-				return normalize(image?.alt) === target && lines.includes(target)
+				return isMatch(imgAlt) || lines.some(line => isMatch(line))
 			})
 		}
-		const heroButton = await waitFor(findMatch)
+		const heroButton = await waitFor(findMatch, 2000, 30)
 		bridgeLog('hero-card', { heroName, found: Boolean(heroButton) })
 
 		debug(heroButton ? 'INFO' : 'ERROR', 'Hero card search result', {
@@ -278,14 +326,15 @@
 		const slotNumber = Number(slotLabel?.match(/slot (\d+)/i)?.[1])
 		bridgeLog('slot-open', { side, heroName, slotLabel })
 		debug('INFO', 'Opening target slot', { side, heroName, slotLabel })
+
+		closeHeroPicker()
+		await sleep(40)
 		slot.click()
 		const isTargetActive = () => {
 			const activeLabel = document.querySelector('button[aria-current="true"][aria-label]')?.getAttribute('aria-label') || ''
 			return new RegExp(`(?:pick hero for|change) ${side} slot ${slotNumber}$`, 'i').test(activeLabel)
 		}
-		const activeSlot = await waitFor(
-			isTargetActive,
-		)
+		const activeSlot = await waitFor(isTargetActive, 1500, 30)
 		if (!activeSlot) {
 			bridgeLog('slot-open-result', { side, heroName, slotLabel, active: false })
 			return 'slot-not-opened'
@@ -302,21 +351,29 @@
 		const selectedBefore = selectedHeroCount(side)
 		bridgeLog('hero-click', { side, heroName, slotLabel, selectedBefore })
 		heroButton.click()
-		return await waitFor(() => {
+		const pickResult = await waitFor(() => {
 			if (hasHeroOnSide(side, heroName)) return 'picked'
 			return selectedHeroCount(side) > selectedBefore ? 'wrong-hero' : null
-		}) || 'not-confirmed'
+		}, 1500, 30) || 'not-confirmed'
+
+		if (pickResult === 'picked') {
+			closeHeroPicker()
+		}
+		return pickResult
 	}
 
 	async function pickHeroWithRetries(side, heroName, slotIndex) {
 		let lastResult = 'not-confirmed'
 		for (let attempt = 1; attempt <= 3; attempt += 1) {
+			closeHeroPicker()
+			if (attempt > 1) await sleep(100)
 			const result = await pickHero(side, heroName, slotIndex)
 			bridgeLog('pick-attempt', { side, heroName, slotIndex, attempt, result })
 			if (['picked', 'already-picked', 'no-empty-slot', 'wrong-hero'].includes(result)) return result
 			lastResult = result
 			debug('WARN', 'Pick attempt failed', { side, heroName, attempt, result })
-			await sleep(250)
+			closeHeroPicker()
+			await sleep(150)
 		}
 		return lastResult
 	}
@@ -324,14 +381,13 @@
 	async function applySide(side, heroes) {
 		const results = []
 
-		for (const [index, rawName] of heroes.slice(0, 5).entries()) {
+		for (let slotIndex = 1; slotIndex <= 5; slotIndex++) {
+			const rawName = Array.isArray(heroes) ? heroes[slotIndex - 1] : null
 			const heroName = String(rawName || '').trim()
 			if (!heroName) continue
 
-			const result = await pickHeroWithRetries(side, heroName, index + 1)
-			results.push(`${side} ${heroName} — ${result}`)
-
-			if (!['picked', 'already-picked'].includes(result)) break
+			const result = await pickHeroWithRetries(side, heroName, slotIndex)
+			results.push(`${side} slot ${slotIndex}: ${heroName} — ${result}`)
 		}
 
 		return results
@@ -445,7 +501,7 @@
 	}
 
 	async function syncRecommendations() {
-		if (recommendationsSyncing || Date.now() - lastRecommendationsReadAt < 800) return
+		if (applyingDraft || recommendationsSyncing || Date.now() - lastRecommendationsReadAt < 800) return
 		recommendationsSyncing = true
 		lastRecommendationsReadAt = Date.now()
 		try {
@@ -492,6 +548,8 @@
 		waitingForReset = true
 		resetGeneration = null
 		lastPayloadSignature = ''
+		failedPayloadSignature = ''
+		failedPayloadRetries = 0
 		showStatus('Reset detected. Clearing the bridge draft…')
 
 		try {
@@ -524,9 +582,10 @@
 			}
 
 			const draft = await response.json()
-			await syncRecommendations()
 			if (draft.watching === false) {
 				lastPayloadSignature = ''
+				failedPayloadSignature = ''
+				failedPayloadRetries = 0
 				showStatus('Auto-sync paused. Resume it in the recommendations panel.')
 				return
 			}
@@ -539,14 +598,23 @@
 				waitingForReset = false
 				resetGeneration = null
 				lastPayloadSignature = ''
+				failedPayloadSignature = ''
+				failedPayloadRetries = 0
 			}
 
-			if (!draft.updated || (!radiant.length && !dire.length)) {
+			const hasHeroes = radiant.some(Boolean) || dire.some(Boolean)
+			if (!draft.updated || !hasHeroes) {
 				lastPayloadSignature = ''
+				failedPayloadSignature = ''
+				failedPayloadRetries = 0
+				syncRecommendations()
 				return
 			}
 
-			if (signature === lastPayloadSignature) return
+			if (signature === lastPayloadSignature) {
+				syncRecommendations()
+				return
+			}
 			bridgeLog('draft-received', { radiant, dire })
 
 			if (!document.querySelector('button[aria-label$="slot 1" i]')) {
@@ -558,7 +626,13 @@
 			showStatus('Draft received. Applying picks…')
 			debug('INFO', 'Draft received', { radiant, dire })
 
-			const results = [...(await applySide('radiant', radiant)), ...(await applySide('dire', dire))]
+			applyingDraft = true
+			let results = []
+			try {
+				results = [...(await applySide('radiant', radiant)), ...(await applySide('dire', dire))]
+			} finally {
+				applyingDraft = false
+			}
 
 			const isCompleted = result => result.endsWith('— picked') || result.endsWith('— already-picked')
 			const failures = results.filter(result => !isCompleted(result))
@@ -566,17 +640,37 @@
 			const skipped = results.filter(result => result.endsWith('— already-picked')).length
 
 			if (failures.length) {
-				bridgeLog('draft-application-failed', { results })
-				showStatus(`Applied ${picked} pick(s), then stopped to avoid incorrect picks.\n${failures.join('\n')}`)
-				debug('ERROR', 'Draft application stopped', { results })
-				return
-			}
+				if (signature === failedPayloadSignature) {
+					failedPayloadRetries++
+				} else {
+					failedPayloadSignature = signature
+					failedPayloadRetries = 1
+				}
 
-			lastPayloadSignature = signature
-			closeHeroPicker()
-			bridgeLog('draft-application-complete', { results })
-			showStatus(`Applied ${picked} pick(s); skipped ${skipped} already placed.`)
-			debug('INFO', 'Draft application complete', { results })
+				bridgeLog('draft-application-failed', { results, attempt: failedPayloadRetries })
+				closeHeroPicker()
+
+				if (failedPayloadRetries < 3) {
+					showStatus(`Applied ${picked} pick(s), retrying ${failures.length} failed (${failedPayloadRetries}/3)…\n${failures.join('\n')}`)
+					debug('WARN', 'Draft application partial failure, will retry', { results, attempt: failedPayloadRetries })
+				} else {
+					lastPayloadSignature = signature
+					failedPayloadSignature = ''
+					failedPayloadRetries = 0
+					showStatus(`Applied ${picked} pick(s). Could not auto-pick:\n${failures.join('\n')}\nPlease select manually.`)
+					debug('ERROR', 'Draft application retry limit reached', { results })
+					setTimeout(syncRecommendations, 200)
+				}
+			} else {
+				lastPayloadSignature = signature
+				failedPayloadSignature = ''
+				failedPayloadRetries = 0
+				closeHeroPicker()
+				bridgeLog('draft-application-complete', { results })
+				showStatus(`Applied ${picked} pick(s); skipped ${skipped} already placed.`)
+				debug('INFO', 'Draft application complete', { results })
+				setTimeout(syncRecommendations, 200)
+			}
 		} catch (error) {
 			debug('ERROR', 'Sync failed', { message: String(error), stack: error?.stack })
 			bridgeLog('sync-error', { message: String(error) })
@@ -586,6 +680,6 @@
 		}
 	}
 
-	setInterval(sync, 1000)
+	setInterval(sync, 400)
 	showStatus('Extension loaded. Waiting for local draft feed…')
 })()

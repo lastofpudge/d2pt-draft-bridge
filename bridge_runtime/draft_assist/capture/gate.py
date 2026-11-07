@@ -30,8 +30,8 @@ GATE_DIR = ASSETS_DIR / "gate"
 SIG_W, SIG_H = 24, 14
 # score (= 1 - correlation) at or below which a frame counts as the draft
 # screen. Same-screen recaptures land near 0; unrelated screens near 1.
-DEFAULT_THRESHOLD = 0.5
-MAX_REFERENCES = 8
+DEFAULT_THRESHOLD = 0.70
+MAX_REFERENCES = 16
 
 
 def signature(frame: np.ndarray) -> np.ndarray:

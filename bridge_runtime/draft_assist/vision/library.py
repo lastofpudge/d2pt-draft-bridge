@@ -36,15 +36,15 @@ PARAMS_FILE = PORTRAITS_DIR / "recognition_params.json"
 class RecognitionParams:
     hash_size: int = 8
     # Max Hamming distance (fraction of bits) for the best match to count.
-    max_distance_frac: float = 0.30
+    max_distance_frac: float = 0.28
     # Min margin (fraction of bits) between best and best-other-hero match;
     # below this the slot is UNKNOWN rather than guessed. Unknown is a
     # legitimate state, not an error.
-    min_margin_frac: float = 0.05
+    min_margin_frac: float = 0.06
     # Grey-level stddev below which a crop is a flat placeholder (empty
     # slot), classified directly: pHash of a near-flat image is noise, so
     # hashing it would produce random matches.
-    flat_std: float = 6.0
+    flat_std: float = 8.5
     # Shift search: pHash is not translation invariant, so each slot is also
     # hashed at windows offset by k * shift_frac (k in -steps..steps, both
     # axes) and the best distance per library entry wins. Absorbs residual
